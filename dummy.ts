@@ -1,137 +1,124 @@
-import { useAuthRefreshToken } from '@/features/auth'
-import { Box, CircularProgress, Typography } from '@mui/material'
-import { Func2 } from '@reduxjs/toolkit'
-import { map } from 'lodash-es'
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import { createApi, fetchBaseQuery } from '@reduxjs/toolkit/query/react'
+import type { BaseQueryFn, FetchArgs, FetchBaseQueryError } from '@reduxjs/toolkit/query/react'
+import queryString from 'query-string'
 
-type Query<T> = {
-  data?: T
-  isLoading: boolean
-  isFetching: boolean
-  isError: boolean
-  isSuccess: boolean
-  error?: unknown
+import { AppRootState } from '@/redux/store'
+
+//Set paths that should be proxied to the local backend (only works on dev, and you need your env set up correctly)
+const getProxyPaths = (user: any) => {
+  return [
+    // `/vendors`,
+    // `/vendors/by`,
+    // `/vendors/_/programmes`,
+    // `/users/_/permissions`,
+    // `/vendors/_/preferredPlant`,
+    // `/regions/_/vendors`,
+    // `/companies/_/vendors`,
+    `/regions/_/vendors`,
+    `/download`
+  ]
 }
 
-type State = {
-  isLoading: boolean
-  isFetching: boolean
-  isSuccess: boolean
-  dataChangedCount: number
+const useBackendApiRoutes = (args: FetchArgs, user: any) => {
+  let useBackend = false
+  if (import.meta.env.DEV) {
+    if (args.url !== undefined) {
+      // console.log(user,args.url);
+      getProxyPaths(user).every(p => {
+        //allow dyanmic paths...
+        let url = args.url
+        //let replacedStr = url.replace(/\/\d+\//, '/_/');
+
+        //console.log(p,replacedStr,(replacedStr == p));
+        //if (replacedStr == p) {
+        useBackend = true
+        return false
+        //}
+        return true
+      })
+    }
+    // if (useBackend) {
+    //   console.log("using proxy to local backend for: ", args.url)
+    // }
+  }
+  return useBackend
 }
 
-type Props<
-  Q extends Record<string, Query<any>>,
-  Data = { [K in keyof Q]: Q[K] extends Query<infer Q> ? Q : never }
-> = {
-  disableLoadFailed?: boolean
-  query: Q
-  trackDataChange?: boolean
-  dataChangeIgnore?: (keyof Q)[]
-  children: Func2<Data, State, React.ReactNode>
-  onSuccess?: (data: Data) => void
-  renderLoading?: () => React.ReactNode
-  renderFailed?: () => React.ReactNode
-}
+const dynamicBaseQuery: BaseQueryFn<FetchArgs, unknown, FetchBaseQueryError> = async (
+  args,
+  WebApi,
+  extraOptions
+) => {
+  const { user } = (WebApi.getState() as AppRootState).auth
+  const useBackendProxy = useBackendApiRoutes(args, user) // Assuming backendApiRoutes is the function you want to use
 
-export function QueryLoading<Q extends Record<string, Query<any>>>({
-  disableLoadFailed,
-  query,
-  trackDataChange,
-  dataChangeIgnore = [],
-  children,
-  onSuccess,
-  renderLoading,
-  renderFailed
-}: Props<Q>) {
-  const refreshToken = useAuthRefreshToken()
+  const baseUrl =
+    useBackendProxy && import.meta.env.VITE_PROXY_URL
+      ? import.meta.env.VITE_PROXY_URL
+      : import.meta.env.VITE_API_URL
 
-  // TODO: Upgrade to only commit final data to render when isFetching is false for all queries
-
-  const { data, isLoading, isFetching, isSuccess, isError, error } = map(query, (v, k) => ({
-    k,
-    v
-  })).reduce(
-    (r, { k, v }) => {
-      r.isLoading = v.isLoading ? true : r.isLoading
-      r.isFetching = v.isFetching ? true : r.isFetching
-      r.isSuccess = !v.isSuccess ? false : r.isSuccess
-      r.isError = v.isError ? true : r.isError
-      r.error = v.isError ? v.error : r.error
-      r.data[k as keyof Q] = v.data!
-      return r
+  const response = await fetchBaseQuery({
+    baseUrl,
+    prepareHeaders(headers, { getState }) {
+      const { user } = (getState() as AppRootState).auth
+      if (user) {
+        headers.set('Authorization', `Bearer ${user.token}`)
+      }
+      return headers
     },
-    {
-      isLoading: false,
-      isFetching: false,
-      isSuccess: true,
-      isError: false,
-      error: null as unknown,
-      data: {} as Record<keyof Q, any>
-    }
-  )
+    paramsSerializer(params) {
+      return queryString.stringify(params)
+    },
+    async fetchFn(input, init) {
+      const response = await fetch(input, init)
+      const clonedResponse = response.clone()
+      if (clonedResponse.headers.get('Content-Type') === 'application/pdf') {
 
-  useEffect(() => {
-    const getToken = async () => {
-      if (error?.toString().includes('Invalid Authorization Header') && isError) {
-        await refreshToken()
-        location.reload()
-      }
-    }
-    getToken()
-  }, [error])
+        const contentDisposition = clonedResponse.headers.get('Content-Disposition');
+        let filename = 'download.pdf'
 
-  const dataChangedCountRef = useRef(0)
-  //const [dataChangedCount, setDataChangedCount] = useState(0)
-  const prevData = useRef<{ [K in keyof Q]: Q[K] extends Query<infer Q> ? Q : never }>()
-
-  // Some DataGrids require to be reset by changing their 'key' when
-  // certain query data changes. This functionality increments a
-  // counter that is used for the DataGrid's key to reset
-  const dataChangedCount = useMemo(() => {
-    if (!trackDataChange) return dataChangedCountRef.current
-
-    let dataChanged = false
-
-    if (prevData.current) {
-      for (var key in data) {
-        if (dataChangeIgnore.includes(key)) continue
-
-        const item = data[key]
-
-        if (item !== prevData.current[key]) {
-          prevData.current[key] = item
-          dataChanged = true
+        if (contentDisposition) {
+          const filenameRegex = /filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/;
+          const matches = filenameRegex.exec(contentDisposition);
+          if (matches != null && matches[1]) { 
+            filename = matches[1].replace(/['"]/g, '');
+          }
         }
+
+        const objectUrl = URL.createObjectURL(await clonedResponse.blob());
+    
+        const link = document.createElement('a');
+        link.href = objectUrl;
+        link.setAttribute('download', filename); // Default filename if Content-Disposition is not available
+        link.style.display = 'none';
+    
+        document.body.appendChild(link);
+        link.click();
+    
+        // Cleanup
+        document.body.removeChild(link);
+        URL.revokeObjectURL(objectUrl);
+        return new Response();
       }
+      return response
     }
-    prevData.current = data
+  })(args, WebApi, extraOptions)
 
-    if (dataChanged) {
-      dataChangedCountRef.current++
-    }
-
-    return dataChangedCountRef.current
-  }, [trackDataChange, data])
-
-  useEffect(() => {
-    if (isSuccess) {
-      onSuccess?.(data)
-    }
-  }, [isSuccess])
-
-  return (
-    <>
-      {isLoading ? (
-        renderLoading?.() || (
-          <Box style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
-          </Box>
-        )
-      ) : isSuccess && !isError ? (
-        children(data!, { isLoading, isFetching, isSuccess, dataChangedCount })
-      ) : (
-        renderFailed?.() || (!disableLoadFailed && <Typography children='Failed to load data' />)
-      )}
-    </>
-  )
+  return response
 }
+
+export const apiBase = createApi({
+  baseQuery: dynamicBaseQuery,
+  endpoints: () => ({}),
+  tagTypes: [
+    'Events',
+    'AnnualCommitment',
+    'Bookings',
+    'BookingComments',
+    'ProcessingTimes',
+    'PlantShiftCapacities',
+    'Vendor',
+    'Agent',
+    'VendorSupportUsers'
+  ]
+})
