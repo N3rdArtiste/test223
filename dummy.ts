@@ -1,124 +1,173 @@
-import { createApi, fetchBaseQuery } from '@reduxjs/toolkit/query/react'
-import type { BaseQueryFn, FetchArgs, FetchBaseQueryError } from '@reduxjs/toolkit/query/react'
-import queryString from 'query-string'
+import React, { useMemo, useState } from 'react';
+import { useForm, Controller, Control } from 'react-hook-form';
+import { yupResolver } from '@hookform/resolvers/yup';
+import * as yup from 'yup';
 
-import { AppRootState } from '@/redux/store'
-
-//Set paths that should be proxied to the local backend (only works on dev, and you need your env set up correctly)
-const getProxyPaths = (user: any) => {
-  return [
-    // `/vendors`,
-    // `/vendors/by`,
-    // `/vendors/_/programmes`,
-    // `/users/_/permissions`,
-    // `/vendors/_/preferredPlant`,
-    // `/regions/_/vendors`,
-    // `/companies/_/vendors`,
-    `/regions/_/vendors`,
-    `/download`
-  ]
+interface FormValues {
+  firstName?: string;
+  email?: string;
+  userType?: 'personal' | 'business';
+  companyName?: string;
+  preferences?: string[];
 }
 
-const useBackendApiRoutes = (args: FetchArgs, user: any) => {
-  let useBackend = false
-  if (import.meta.env.DEV) {
-    if (args.url !== undefined) {
-      // console.log(user,args.url);
-      getProxyPaths(user).every(p => {
-        //allow dyanmic paths...
-        let url = args.url
-        //let replacedStr = url.replace(/\/\d+\//, '/_/');
+interface FieldConfig {
+  name: keyof FormValues;
+  label: string;
+  type: string;
+  options?: string[];
+  validation: yup.AnySchema;
+  nextStepCondition?: (values: FormValues) => boolean;
+}
 
-        //console.log(p,replacedStr,(replacedStr == p));
-        //if (replacedStr == p) {
-        useBackend = true
-        return false
-        //}
-        return true
-      })
+const formConfig: FieldConfig[] = [
+  {
+    name: 'firstName',
+    label: 'First Name',
+    type: 'text',
+    validation: yup.string().required('First name is required'),
+  },
+  {
+    name: 'email',
+    label: 'Email',
+    type: 'email',
+    validation: yup.string().email('Invalid email').required('Email is required'),
+  },
+  {
+    name: 'userType',
+    label: 'User Type',
+    type: 'select',
+    options: ['personal', 'business'],
+    validation: yup.string().required('User type is required'),
+    nextStepCondition: (values) => values.userType === 'business',
+  },
+  {
+    name: 'companyName',
+    label: 'Company Name',
+    type: 'text',
+    validation: yup.string().when('userType', {
+      is: 'business',
+      then: (schema) => schema.required('Company name is required for business users'),
+    }),
+  },
+  {
+    name: 'preferences',
+    label: 'Preferences',
+    type: 'checkbox',
+    options: ['newsletter', 'updates', 'offers'],
+    validation: yup.array().min(1, 'Select at least one preference'),
+  },
+];
+
+const buildValidationSchema = (currentStep: number, values: FormValues) => {
+  const currentField = formConfig[currentStep];
+  const schemaObject = formConfig.slice(0, currentStep + 1).reduce((acc, field) => {
+    acc[field.name] = field.validation;
+    return acc;
+  }, {} as Record<keyof FormValues, yup.AnySchema>);
+
+  return yup.object().shape(schemaObject).test(
+    'conditional-validation',
+    'Skip validation for hidden fields',
+    (value) => {
+      // Custom logic to skip validation for fields that are conditionally hidden
+      return formConfig.every((field, index) => {
+        if (index > currentStep) return true;
+        if (field.nextStepCondition && !field.nextStepCondition(values)) return true;
+        return schemaObject[field.name].isValidSync(value[field.name]);
+      });
     }
-    // if (useBackend) {
-    //   console.log("using proxy to local backend for: ", args.url)
-    // }
-  }
-  return useBackend
-}
+  );
+};
 
-const dynamicBaseQuery: BaseQueryFn<FetchArgs, unknown, FetchBaseQueryError> = async (
-  args,
-  WebApi,
-  extraOptions
-) => {
-  const { user } = (WebApi.getState() as AppRootState).auth
-  const useBackendProxy = useBackendApiRoutes(args, user) // Assuming backendApiRoutes is the function you want to use
+const ProgressiveForm = () => {
+  const [currentStep, setCurrentStep] = useState(0);
+  const [visitedSteps, setVisitedSteps] = useState<Set<number>>(new Set([0]));
 
-  const baseUrl =
-    useBackendProxy && import.meta.env.VITE_PROXY_URL
-      ? import.meta.env.VITE_PROXY_URL
-      : import.meta.env.VITE_API_URL
+  const { control, handleSubmit, watch, trigger, formState } = useForm<FormValues>({
+    resolver: yupResolver(buildValidationSchema(currentStep, watch())),
+    mode: 'onChange',
+  });
 
-  const response = await fetchBaseQuery({
-    baseUrl,
-    prepareHeaders(headers, { getState }) {
-      const { user } = (getState() as AppRootState).auth
-      if (user) {
-        headers.set('Authorization', `Bearer ${user.token}`)
-      }
-      return headers
-    },
-    paramsSerializer(params) {
-      return queryString.stringify(params)
-    },
-    async fetchFn(input, init) {
-      const response = await fetch(input, init)
-      const clonedResponse = response.clone()
-      if (clonedResponse.headers.get('Content-Type') === 'application/pdf') {
+  const values = watch();
+  const isFinalStep = currentStep === formConfig.length - 1;
 
-        const contentDisposition = clonedResponse.headers.get('Content-Disposition');
-        let filename = 'download.pdf'
+  const shouldShowField = (index: number): boolean => {
+    if (index > currentStep) return false;
+    const field = formConfig[index];
+    return !field.nextStepCondition || field.nextStepCondition(values);
+  };
 
-        if (contentDisposition) {
-          const filenameRegex = /filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/;
-          const matches = filenameRegex.exec(contentDisposition);
-          if (matches != null && matches[1]) { 
-            filename = matches[1].replace(/['"]/g, '');
-          }
-        }
-
-        const objectUrl = URL.createObjectURL(await clonedResponse.blob());
-    
-        const link = document.createElement('a');
-        link.href = objectUrl;
-        link.setAttribute('download', filename); // Default filename if Content-Disposition is not available
-        link.style.display = 'none';
-    
-        document.body.appendChild(link);
-        link.click();
-    
-        // Cleanup
-        document.body.removeChild(link);
-        URL.revokeObjectURL(objectUrl);
-        return new Response();
-      }
-      return response
+  const progressToNextStep = async () => {
+    const isValid = await trigger(formConfig[currentStep].name as any);
+    if (isValid && currentStep < formConfig.length - 1) {
+      setCurrentStep(prev => Math.min(prev + 1, formConfig.length - 1));
+      setVisitedSteps(prev => new Set([...prev, currentStep + 1]));
     }
-  })(args, WebApi, extraOptions)
+  };
 
-  return response
-}
+  const renderField = (config: FieldConfig, index: number) => {
+    if (!shouldShowField(index) || !visitedSteps.has(index)) return null;
 
-export const apiBase = createApi({
-  baseQuery: dynamicBaseQuery,
-  endpoints: () => ({}),
-  tagTypes: [
-    'Events',
-    'AnnualCommitment',
-    'Bookings',
-    'BookingComments',
-    'ProcessingTimes',
-    'PlantShiftCapacities',
-    'Vendor',
-    'Agent',
-    'VendorSupportUsers'
-  ]
-})
+    return (
+      <div key={config.name} className="form-field">
+        <Controller
+          name={config.name}
+          control={control}
+          render={({ field, fieldState }) => (
+            <>
+              <label>{config.label}</label>
+              {config.type === 'select' ? (
+                <select {...field} onChange={(e) => { field.onChange(e); progressToNextStep(); }}>
+                  <option value="">Select...</option>
+                  {config.options?.map(option => (
+                    <option key={option} value={option}>{option}</option>
+                  ))}
+                </select>
+              ) : config.type === 'checkbox' ? (
+                <div>
+                  {config.options?.map(option => (
+                    <label key={option}>
+                      <input
+                        type="checkbox"
+                        value={option}
+                        checked={field.value?.includes(option)}
+                        onChange={(e) => {
+                          const newValue = e.target.checked
+                            ? [...(field.value || []), option]
+                            : (field.value || []).filter((v: string) => v !== option);
+                          field.onChange(newValue);
+                          progressToNextStep();
+                        }}
+                      />
+                      {option}
+                    </label>
+                  ))}
+                </div>
+              ) : (
+                <input
+                  {...field}
+                  type={config.type}
+                  onChange={(e) => { field.onChange(e); progressToNextStep(); }}
+                />
+              )}
+              {fieldState.error && <span className="error">{fieldState.error.message}</span>}
+            </>
+          )}
+        />
+      </div>
+    );
+  };
+
+  return (
+    <form onSubmit={handleSubmit((data) => console.log(data))}>
+      {formConfig.map((config, index) => renderField(config, index))}
+      
+      {isFinalStep && formState.isValid && (
+        <button type="submit">Submit</button>
+      )}
+    </form>
+  );
+};
+
+export default ProgressiveForm;
