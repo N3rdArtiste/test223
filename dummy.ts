@@ -1,185 +1,46 @@
-import React, { useEffect, useMemo, createContext } from 'react';
-import { useForm, FormProvider, useFormContext, Controller } from 'react-hook-form';
-import { yupResolver } from '@hookform/resolvers/yup';
-import * as yup from 'yup';
+// useUnlockField.ts
+import { useState, useEffect } from "react";
+import { useFormContext } from "react-hook-form";
+import { FormValues } from "./types";
 
-// ----------------------------
-// Type Definitions
-// ----------------------------
-type FieldName = string;
-type FieldDependencies = Record<FieldName, FieldName[]>;
+/**
+ * Hook for determining whether a field (and its subsequent step) 
+ * should be unlocked (visible) once valid, and remain visible afterward.
+ *
+ * @param fieldName - The name of the field (key of FormValues)
+ * @param condition - (optional) A function to further check the field's value
+ */
+export function useUnlockField(
+  fieldName: keyof FormValues,
+  condition?: (value: any) => boolean
+): boolean {
+  const { watch, formState: { errors } } = useFormContext<FormValues>();
+  
+  // Tracks whether we've already unlocked this step
+  const [unlocked, setUnlocked] = useState(false);
+  
+  // Get the current value of the field from React Hook Form
+  const fieldValue = watch(fieldName);
 
-interface FieldConfig {
-  name: FieldName;
-  validation: yup.AnySchema;
-  dependencies?: FieldName[];
-  isActive?: (values: Record<string, unknown>) => boolean;
-}
-
-interface FormLogicConfig {
-  fields: Record<FieldName, FieldConfig>;
-  dependencies: FieldDependencies;
-}
-
-interface FormLayoutProps {
-  children: React.ReactNode;
-}
-
-// ----------------------------
-// Context & Providers
-// ----------------------------
-const FormLogicContext = createContext<{
-  activeFields: Set<FieldName>;
-  dependencies: FieldDependencies;
-}>({ activeFields: new Set(), dependencies: {} });
-
-const FormLogicProvider: React.FC<{ config: FormLogicConfig }> = ({ config, children }) => {
-  const methods = useForm({
-    resolver: yupResolver(buildValidationSchema(config)),
-    mode: 'onChange'
-  });
-
-  const { watch, setValue } = methods;
-  const values = watch();
-  const activeFields = useMemo(() => calculateActiveFields(config, values), [config, values]);
-
-  // Generic field dependency cleanup
+  // Run effect to unlock step once the field is valid and meets the condition
   useEffect(() => {
-    const subscription = watch((value, { name }) => {
-      if (name && config.dependencies[name]) {
-        config.dependencies[name].forEach(dependentField => {
-          setValue(dependentField, '');
-        });
-      }
-    });
-    return () => subscription.unsubscribe();
-  }, [watch, setValue, config.dependencies]);
+    const hasNoError = !errors[fieldName];
+    const meetsCondition = condition ? condition(fieldValue) : true;
 
-  return (
-    <FormProvider {...methods}>
-      <FormLogicContext.Provider value={{ activeFields, dependencies: config.dependencies }}>
-        {children}
-      </FormLogicContext.Provider>
-    </FormProvider>
-  );
-};
-
-// ----------------------------
-// Custom Hooks
-// ----------------------------
-const useFormLogic = () => {
-  const { activeFields, dependencies } = React.useContext(FormLogicContext);
-  const { watch } = useFormContext();
-  const values = watch();
-
-  return {
-    activeFields,
-    dependencies,
-    values
-  };
-};
-
-// ----------------------------
-// Layout Components
-// ----------------------------
-const FormField: React.FC<{ name: FieldName }> = ({ name }) => {
-  const { activeFields } = useFormLogic();
-  const { control } = useFormContext();
-
-  if (!activeFields.has(name)) return null;
-
-  return (
-    <Controller
-      name={name}
-      control={control}
-      render={({ field, fieldState }) => (
-        <div className="form-field">
-          <input {...field} />
-          {fieldState.error && <span>{fieldState.error.message}</span>}
-        </div>
-      )}
-    />
-  );
-};
-
-const FormContainer: React.FC<FormLayoutProps> = ({ children }) => (
-  <div className="form-container">{children}</div>
-);
-
-// ----------------------------
-// Helper Functions
-// ----------------------------
-const calculateActiveFields = (config: FormLogicConfig, values: Record<string, unknown>) => {
-  return new Set(
-    Object.entries(config.fields)
-      .filter(([_, fieldConfig]) => 
-        !fieldConfig.isActive || fieldConfig.isActive(values)
-      )
-      .map(([name]) => name)
-  );
-};
-
-const buildValidationSchema = (config: FormLogicConfig) => {
-  const shape = Object.entries(config.fields).reduce((acc, [name, field]) => {
-    acc[name] = field.validation;
-    return acc;
-  }, {} as Record<string, yup.AnySchema>);
-
-  return yup.object().shape(shape);
-};
-
-// ----------------------------
-// Usage Example
-// ----------------------------
-const formLogicConfig: FormLogicConfig = {
-  fields: {
-    firstName: {
-      name: 'firstName',
-      validation: yup.string().required('First name is required'),
-      dependencies: ['email']
-    },
-    email: {
-      name: 'email',
-      validation: yup.string().email().required(),
-      isActive: (values) => !!values.firstName
-    },
-    userType: {
-      name: 'userType',
-      validation: yup.string().required(),
-      dependencies: ['companyName']
-    },
-    companyName: {
-      name: 'companyName',
-      validation: yup.string().when('userType', {
-        is: 'business',
-        then: yup.string().required()
-      })
+    if (hasNoError && meetsCondition) {
+      // Once unlocked, stay unlocked
+      setUnlocked(true);
     }
-  },
-  dependencies: {
-    firstName: ['email'],
-    userType: ['companyName']
-  }
-};
+  }, [errors, fieldName, fieldValue, condition]);
 
-const AppLayout = () => (
-  <FormContainer>
-    <div className="form-section">
-      <h2>Personal Information</h2>
-      <FormField name="firstName" />
-      <FormField name="email" />
-    </div>
+  /**
+   * We consider the field "visible" if:
+   * 1) we have already unlocked it, OR
+   * 2) it's currently valid + meets the optional condition
+   */
+  const isVisible =
+    unlocked ||
+    (!errors[fieldName] && (condition ? condition(fieldValue) : !!fieldValue));
 
-    <div className="form-section">
-      <h2>Business Information</h2>
-      <FormField name="userType" />
-      <FormField name="companyName" />
-    </div>
-  </FormContainer>
-);
-
-const App = () => (
-  <FormLogicProvider config={formLogicConfig}>
-    <AppLayout />
-  </FormLogicProvider>
-);
+  return isVisible;
+}
