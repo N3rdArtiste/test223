@@ -1,46 +1,156 @@
-// useUnlockField.ts
-import { useState, useEffect } from "react";
-import { useFormContext } from "react-hook-form";
-import { FormValues } from "./types";
+//openapi-config.ts
+import type { ConfigFile } from '@rtk-query/codegen-openapi'
 
-/**
- * Hook for determining whether a field (and its subsequent step) 
- * should be unlocked (visible) once valid, and remain visible afterward.
- *
- * @param fieldName - The name of the field (key of FormValues)
- * @param condition - (optional) A function to further check the field's value
- */
-export function useUnlockField(
-  fieldName: keyof FormValues,
-  condition?: (value: any) => boolean
-): boolean {
-  const { watch, formState: { errors } } = useFormContext<FormValues>();
-  
-  // Tracks whether we've already unlocked this step
-  const [unlocked, setUnlocked] = useState(false);
-  
-  // Get the current value of the field from React Hook Form
-  const fieldValue = watch(fieldName);
+export default {
+  schemaFile:     '.json',
+  apiFile:        '../src/api/apiBase.ts',
+  outputFile:     '../src/api/api.ts',
+  apiImport:      'apiBase',
+  exportName:     'api',
+  hooks:          true,
+  argSuffix:      'Request',
+  responseSuffix: 'Result'
+} satisfies ConfigFile
 
-  // Run effect to unlock step once the field is valid and meets the condition
-  useEffect(() => {
-    const hasNoError = !errors[fieldName];
-    const meetsCondition = condition ? condition(fieldValue) : true;
 
-    if (hasNoError && meetsCondition) {
-      // Once unlocked, stay unlocked
-      setUnlocked(true);
-    }
-  }, [errors, fieldName, fieldValue, condition]);
+//apiExtensions.ts
 
-  /**
-   * We consider the field "visible" if:
-   * 1) we have already unlocked it, OR
-   * 2) it's currently valid + meets the optional condition
-   */
-  const isVisible =
-    unlocked ||
-    (!errors[fieldName] && (condition ? condition(fieldValue) : !!fieldValue));
+import { api } from './api'
 
-  return isVisible;
+api.enhanceEndpoints({
+    endpoints: {
+      testSearch: {
+        providesTags(r, e, { }) {
+          return ['test']
+        }
+      },
+      testCreate: {
+        invalidatesTags(r, e, { }) {
+          return ['test']
+        }
+      }})
+
+
+//QueryLoading
+
+import { Box, CircularProgress, Typography } from '@mui/material'
+import { Func2 } from '@reduxjs/toolkit'
+import { map } from 'lodash-es'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
+
+type Query<T> = {
+  data?: T
+  isLoading: boolean
+  isFetching: boolean
+  isError: boolean
+  isSuccess: boolean
+  error?: unknown
 }
+
+type State = {
+  isLoading: boolean
+  isFetching: boolean
+  isSuccess: boolean
+  dataChangedCount: number
+}
+
+type Props<
+  Q extends Record<string, Query<any>>,
+  Data = { [K in keyof Q]: Q[K] extends Query<infer Q> ? Q : never }
+> = {
+  disableLoadFailed?: boolean
+  query: Q
+  trackDataChange?: boolean
+  dataChangeIgnore?: (keyof Q)[]
+  children: Func2<Data, State, React.ReactNode>
+  onSuccess?: (data: Data) => void
+  renderLoading?: () => React.ReactNode
+  renderFailed?: () => React.ReactNode
+}
+
+export function QueryLoading<Q extends Record<string, Query<any>>>({
+  disableLoadFailed,
+  query,
+  trackDataChange,
+  dataChangeIgnore = [],
+  children,
+  onSuccess,
+  renderLoading,
+  renderFailed
+}: Props<Q>) {
+
+  const { data, isLoading, isFetching, isSuccess, isError, error } = map(query, (v, k) => ({
+    k,
+    v
+  })).reduce(
+    (r, { k, v }) => {
+      r.isLoading = v.isLoading ? true : r.isLoading
+      r.isFetching = v.isFetching ? true : r.isFetching
+      r.isSuccess = !v.isSuccess ? false : r.isSuccess
+      r.isError = v.isError ? true : r.isError
+      r.error = v.isError ? v.error : r.error
+      r.data[k as keyof Q] = v.data!
+      return r
+    },
+    {
+      isLoading: false,
+      isFetching: false,
+      isSuccess: true,
+      isError: false,
+      error: null as unknown,
+      data: {} as Record<keyof Q, any>
+    }
+  )
+
+  const dataChangedCountRef = useRef(0)
+
+  const prevData = useRef<{ [K in keyof Q]: Q[K] extends Query<infer Q> ? Q : never }>()
+
+  const dataChangedCount = useMemo(() => {
+    if (!trackDataChange) return dataChangedCountRef.current
+
+    let dataChanged = false
+
+    if (prevData.current) {
+      for (var key in data) {
+        if (dataChangeIgnore.includes(key)) continue
+
+        const item = data[key]
+
+        if (item !== prevData.current[key]) {
+          prevData.current[key] = item
+          dataChanged = true
+        }
+      }
+    }
+    prevData.current = data
+
+    if (dataChanged) {
+      dataChangedCountRef.current++
+    }
+
+    return dataChangedCountRef.current
+  }, [trackDataChange, data])
+
+  useEffect(() => {
+    if (isSuccess) {
+      onSuccess?.(data)
+    }
+  }, [isSuccess])
+
+  return (
+    <>
+      {isLoading ? (
+        renderLoading?.() || (
+          <Box style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+          </Box>
+        )
+      ) : isSuccess && !isError ? (
+        children(data!, { isLoading, isFetching, isSuccess, dataChangedCount })
+      ) : (
+        renderFailed?.() || (!disableLoadFailed && <Typography children='Failed to load data' />)
+      )}
+    </>
+  )
+}
+
